@@ -25,9 +25,12 @@ internal sealed class QuotaTrayContext : ApplicationContext
     private readonly ToolStripMenuItem _weeklyItem = new("周额度：读取中…") { Enabled = false };
     private readonly ToolStripMenuItem _updatedItem = new("上次更新：尚未更新") { Enabled = false };
     private readonly NotifyIcon _notifyIcon;
-    private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 10 * 60 * 1000 };
+    private readonly System.Windows.Forms.Timer _stateTimer = new() { Interval = 60 * 1000 };
     private Icon? _generatedIcon;
     private bool _refreshInProgress;
+    private bool _hasQuotaSnapshot;
+    private DateTime? _lastQuotaAttempt;
+    private DesktopState _lastDesktopState = DesktopState.Unknown;
 
     public QuotaTrayContext()
     {
@@ -37,7 +40,7 @@ internal sealed class QuotaTrayContext : ApplicationContext
             _weeklyItem,
             _updatedItem,
             new ToolStripSeparator(),
-            new ToolStripMenuItem("立即刷新", null, async (_, _) => await RefreshAsync()),
+            new ToolStripMenuItem("立即刷新", null, async (_, _) => await RefreshNowAsync()),
             new ToolStripMenuItem("打开 Codex 用量页面", null, (_, _) => OpenUsageDashboard()),
             new ToolStripSeparator(),
             new ToolStripMenuItem("退出", null, (_, _) => ExitThread())
@@ -52,9 +55,9 @@ internal sealed class QuotaTrayContext : ApplicationContext
         };
         _notifyIcon.MouseUp += OnNotifyIconMouseUp;
 
-        _refreshTimer.Tick += async (_, _) => await RefreshAsync();
-        _refreshTimer.Start();
-        _ = RefreshAsync();
+        _stateTimer.Tick += async (_, _) => await UpdateRefreshScheduleAsync();
+        _stateTimer.Start();
+        _ = UpdateRefreshScheduleAsync();
     }
 
     private void OnNotifyIconMouseUp(object? sender, MouseEventArgs e)
@@ -65,7 +68,35 @@ internal sealed class QuotaTrayContext : ApplicationContext
         }
     }
 
-    private async Task RefreshAsync()
+    private async Task RefreshNowAsync()
+    {
+        var desktopState = GetCodexDesktopState();
+        _lastDesktopState = desktopState;
+        if (desktopState == DesktopState.Stopped)
+        {
+            SetQuotaPausedDisplay();
+            return;
+        }
+
+        await RefreshQuotaAsync();
+    }
+
+    private async Task UpdateRefreshScheduleAsync()
+    {
+        var desktopState = GetCodexDesktopState();
+        if (ShouldRefresh(desktopState, _lastDesktopState, _lastQuotaAttempt))
+        {
+            await RefreshQuotaAsync();
+        }
+        else if (desktopState == DesktopState.Stopped)
+        {
+            SetQuotaPausedDisplay();
+        }
+
+        _lastDesktopState = desktopState;
+    }
+
+    private async Task RefreshQuotaAsync()
     {
         if (_refreshInProgress)
         {
@@ -73,6 +104,7 @@ internal sealed class QuotaTrayContext : ApplicationContext
         }
 
         _refreshInProgress = true;
+        _lastQuotaAttempt = DateTime.Now;
         try
         {
             var quota = await GetQuotaAsync();
@@ -91,6 +123,41 @@ internal sealed class QuotaTrayContext : ApplicationContext
         {
             _refreshInProgress = false;
         }
+    }
+
+    private static bool ShouldRefresh(DesktopState desktopState, DesktopState previousDesktopState, DateTime? lastQuotaAttempt)
+    {
+        if (desktopState == DesktopState.Stopped)
+        {
+            return false;
+        }
+
+        if (previousDesktopState is DesktopState.Unknown or DesktopState.Stopped ||
+            desktopState == DesktopState.Foreground && previousDesktopState != DesktopState.Foreground)
+        {
+            return true;
+        }
+
+        if (lastQuotaAttempt is null)
+        {
+            return true;
+        }
+
+        var interval = desktopState == DesktopState.Foreground ? TimeSpan.FromMinutes(5) : TimeSpan.FromMinutes(15);
+        return DateTime.Now - lastQuotaAttempt.Value >= interval;
+    }
+
+    private void SetQuotaPausedDisplay()
+    {
+        if (!_hasQuotaSnapshot)
+        {
+            _fiveHourItem.Text = "5 小时：尚未读取";
+            _weeklyItem.Text = "周额度：尚未读取";
+            SetIndicatorIcon(new IndicatorState(0, Color.DimGray, false));
+        }
+
+        _updatedItem.Text = "Codex 未运行：已暂停刷新（保留上次额度）";
+        _notifyIcon.Text = "Codex 未运行：已暂停刷新";
     }
 
     private static async Task<QuotaSnapshot> GetQuotaAsync()
@@ -156,12 +223,48 @@ internal sealed class QuotaTrayContext : ApplicationContext
     {
         _fiveHourItem.Text = FormatWindow(quota.FiveHour);
         _weeklyItem.Text = FormatWindow(quota.Weekly);
-        _updatedItem.Text = $"上次更新：{DateTime.Now:HH:mm:ss}（每 10 分钟自动刷新）";
+        _updatedItem.Text = $"上次更新：{DateTime.Now:HH:mm:ss}（前台 5 分钟 / 后台 15 分钟）";
 
         var fiveHourLeft = quota.FiveHour.RemainingPercent;
         var weeklyLeft = quota.Weekly.RemainingPercent;
         _notifyIcon.Text = $"Codex：5h {FormatShortPercent(fiveHourLeft)} | 周 {FormatShortPercent(weeklyLeft)}";
         SetIndicatorIcon(GetIndicatorState(fiveHourLeft, weeklyLeft, quota.FiveHour.ResetAfterSeconds));
+        _hasQuotaSnapshot = true;
+    }
+
+    private static DesktopState GetCodexDesktopState()
+    {
+        var processIds = Process.GetProcessesByName("ChatGPT")
+            .Where(IsCodexDesktopProcess)
+            .Select(process => process.Id)
+            .ToHashSet();
+        if (processIds.Count == 0)
+        {
+            return DesktopState.Stopped;
+        }
+
+        var foregroundWindow = GetForegroundWindow();
+        GetWindowThreadProcessId(foregroundWindow, out var foregroundProcessId);
+        return processIds.Contains((int)foregroundProcessId) ? DesktopState.Foreground : DesktopState.Background;
+    }
+
+    private static bool IsCodexDesktopProcess(Process process)
+    {
+        try
+        {
+            var path = process.MainModule?.FileName;
+            return path is not null &&
+                path.Contains("\\OpenAI.Codex_", StringComparison.OrdinalIgnoreCase) &&
+                path.EndsWith("\\app\\ChatGPT.exe", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
     }
 
     private static string FormatWindow(QuotaWindow window)
@@ -266,7 +369,7 @@ internal sealed class QuotaTrayContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
-        _refreshTimer.Stop();
+        _stateTimer.Stop();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _generatedIcon?.Dispose();
@@ -275,6 +378,12 @@ internal sealed class QuotaTrayContext : ApplicationContext
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 }
 
 internal sealed record QuotaSnapshot(QuotaWindow FiveHour, QuotaWindow Weekly);
@@ -285,3 +394,11 @@ internal sealed record QuotaWindow(string Label, double? UsedPercent, double? Re
 }
 
 internal sealed record IndicatorState(int ActiveLights, Color Color, bool ShowPurple);
+
+internal enum DesktopState
+{
+    Unknown,
+    Stopped,
+    Background,
+    Foreground
+}
