@@ -140,6 +140,11 @@ internal sealed class QuotaTrayContext : ApplicationContext
             return false;
         }
 
+        if (lastQuotaAttempt is not null && DateTime.Now - lastQuotaAttempt.Value < TimeSpan.FromMinutes(5))
+        {
+            return false;
+        }
+
         if (previousDesktopState is DesktopState.Unknown or DesktopState.Stopped ||
             desktopState == DesktopState.Foreground && previousDesktopState != DesktopState.Foreground)
         {

@@ -150,6 +150,7 @@ function Get-CodexDesktopState {
 
 function Get-RefreshDecision([string]$DesktopState, [string]$PreviousDesktopState, $LastQuotaAttempt, [datetime]$Now) {
     if ($DesktopState -eq 'Stopped') { return 'Pause' }
+    if ($null -ne $LastQuotaAttempt -and ($Now - $LastQuotaAttempt).TotalMinutes -lt 5) { return 'Wait' }
     if ($PreviousDesktopState -eq 'Unknown' -or $PreviousDesktopState -eq 'Stopped') { return 'Refresh' }
     if ($DesktopState -eq 'Foreground' -and $PreviousDesktopState -ne 'Foreground') { return 'Refresh' }
 
