@@ -62,14 +62,17 @@ function Get-IndicatorState($FiveHourRemaining, $WeeklyRemaining, $ResetAfterSec
         return [pscustomobject]@{ ActiveLights = 2; Color = [System.Drawing.Color]::Firebrick; ShowPurple = $false }
     }
 
-    if ($FiveHourRemaining -ge 75) {
+    if ($FiveHourRemaining -ge 100) {
         $activeLights = 4; $color = [System.Drawing.Color]::FromArgb(34, 139, 34)
     }
-    elseif ($FiveHourRemaining -ge 50) {
+    elseif ($FiveHourRemaining -ge 75) {
         $activeLights = 3; $color = [System.Drawing.Color]::FromArgb(34, 139, 34)
     }
-    elseif ($FiveHourRemaining -ge 25) {
+    elseif ($FiveHourRemaining -ge 50) {
         $activeLights = 2; $color = [System.Drawing.Color]::FromArgb(34, 139, 34)
+    }
+    elseif ($FiveHourRemaining -ge 25) {
+        $activeLights = 1; $color = [System.Drawing.Color]::FromArgb(34, 139, 34)
     }
     elseif ($FiveHourRemaining -ge 10) {
         $activeLights = 1; $color = [System.Drawing.Color]::DarkOrange
