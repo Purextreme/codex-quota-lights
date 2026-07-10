@@ -8,9 +8,17 @@ namespace CodexQuotaIndicator;
 
 internal static class Program
 {
+    private const string InstanceMutexName = "Local\\CodexQuotaIndicator";
+
     [STAThread]
     private static void Main()
     {
+        using var singleInstanceMutex = new Mutex(true, InstanceMutexName, out var createdNew);
+        if (!createdNew)
+        {
+            return;
+        }
+
         ApplicationConfiguration.Initialize();
         Application.Run(new QuotaTrayContext());
     }
@@ -311,10 +319,10 @@ internal sealed class QuotaTrayContext : ApplicationContext
 
         var (activeLights, color) = fiveHourRemaining switch
         {
-            >= 100 => (4, Color.FromArgb(34, 139, 34)),
-            >= 75 => (3, Color.FromArgb(34, 139, 34)),
-            >= 50 => (2, Color.FromArgb(34, 139, 34)),
-            >= 25 => (1, Color.FromArgb(34, 139, 34)),
+            >= 100 => (4, Color.FromArgb(44, 154, 63)),
+            >= 75 => (3, Color.FromArgb(44, 154, 63)),
+            >= 50 => (2, Color.FromArgb(44, 154, 63)),
+            >= 25 => (1, Color.FromArgb(44, 154, 63)),
             >= 10 => (1, Color.DarkOrange),
             _ => (1, Color.Firebrick)
         };

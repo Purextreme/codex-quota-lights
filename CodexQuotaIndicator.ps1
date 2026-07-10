@@ -19,6 +19,15 @@ public static class TrayNativeMethods {
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+if (-not $RunOnce) {
+    [bool]$createdNew = $false
+    $script:singleInstanceMutex = New-Object System.Threading.Mutex($true, 'Local\CodexQuotaIndicator', [ref]$createdNew)
+    if (-not $createdNew) {
+        $script:singleInstanceMutex.Dispose()
+        exit 0
+    }
+}
+
 $usageUrl = 'https://chatgpt.com/backend-api/wham/usage'
 $fiveHourItem = New-Object System.Windows.Forms.ToolStripMenuItem('5 小时：读取中…')
 $fiveHourItem.Enabled = $false
@@ -71,16 +80,16 @@ function Get-IndicatorState($FiveHourRemaining, $WeeklyRemaining, $ResetAfterSec
     }
 
     if ($FiveHourRemaining -ge 100) {
-        $activeLights = 4; $color = [System.Drawing.Color]::FromArgb(34, 139, 34)
+        $activeLights = 4; $color = [System.Drawing.Color]::FromArgb(44, 154, 63)
     }
     elseif ($FiveHourRemaining -ge 75) {
-        $activeLights = 3; $color = [System.Drawing.Color]::FromArgb(34, 139, 34)
+        $activeLights = 3; $color = [System.Drawing.Color]::FromArgb(44, 154, 63)
     }
     elseif ($FiveHourRemaining -ge 50) {
-        $activeLights = 2; $color = [System.Drawing.Color]::FromArgb(34, 139, 34)
+        $activeLights = 2; $color = [System.Drawing.Color]::FromArgb(44, 154, 63)
     }
     elseif ($FiveHourRemaining -ge 25) {
-        $activeLights = 1; $color = [System.Drawing.Color]::FromArgb(34, 139, 34)
+        $activeLights = 1; $color = [System.Drawing.Color]::FromArgb(44, 154, 63)
     }
     elseif ($FiveHourRemaining -ge 10) {
         $activeLights = 1; $color = [System.Drawing.Color]::DarkOrange
@@ -229,6 +238,7 @@ $exitItem.Add_Click({
     $notify.Visible = $false
     $notify.Dispose()
     if ($null -ne $script:generatedIcon) { $script:generatedIcon.Dispose() }
+    if ($null -ne $script:singleInstanceMutex) { $script:singleInstanceMutex.Dispose() }
     [System.Windows.Forms.Application]::Exit()
 })
 [void]$menu.Items.Add($refreshItem)
