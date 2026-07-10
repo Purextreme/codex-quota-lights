@@ -61,12 +61,13 @@ function Get-WindowDisplay($Window, [string]$Label) {
 }
 
 function Get-IndicatorState($FiveHourRemaining, $WeeklyRemaining, $ResetAfterSeconds) {
+    $showPurple = $null -ne $ResetAfterSeconds -and [double]$ResetAfterSeconds -ge 0 -and [double]$ResetAfterSeconds -lt 1200
     if ($null -eq $FiveHourRemaining) {
-        return [pscustomobject]@{ ActiveLights = 0; Color = [System.Drawing.Color]::DimGray; ShowPurple = $false }
+        return [pscustomobject]@{ ActiveLights = 0; Color = [System.Drawing.Color]::DimGray; ShowPurple = $showPurple }
     }
 
     if ($null -ne $WeeklyRemaining -and $WeeklyRemaining -le 10 -and $FiveHourRemaining -le 25) {
-        return [pscustomobject]@{ ActiveLights = 2; Color = [System.Drawing.Color]::Firebrick; ShowPurple = $false }
+        return [pscustomobject]@{ ActiveLights = 2; Color = [System.Drawing.Color]::Firebrick; ShowPurple = $showPurple }
     }
 
     if ($FiveHourRemaining -ge 100) {
@@ -88,7 +89,6 @@ function Get-IndicatorState($FiveHourRemaining, $WeeklyRemaining, $ResetAfterSec
         $activeLights = 1; $color = [System.Drawing.Color]::Firebrick
     }
 
-    $showPurple = $FiveHourRemaining -gt 25 -and $null -ne $ResetAfterSeconds -and [double]$ResetAfterSeconds -le 1200
     return [pscustomobject]@{ ActiveLights = $activeLights; Color = $color; ShowPurple = $showPurple }
 }
 

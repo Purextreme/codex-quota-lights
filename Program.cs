@@ -298,14 +298,15 @@ internal sealed class QuotaTrayContext : ApplicationContext
 
     private static IndicatorState GetIndicatorState(double? fiveHourRemaining, double? weeklyRemaining, double? resetAfterSeconds)
     {
+        var showPurple = resetAfterSeconds is >= 0 and < 1200;
         if (fiveHourRemaining is null)
         {
-            return new IndicatorState(0, Color.DimGray, false);
+            return new IndicatorState(0, Color.DimGray, showPurple);
         }
 
         if (weeklyRemaining <= 10 && fiveHourRemaining <= 25)
         {
-            return new IndicatorState(2, Color.Firebrick, false);
+            return new IndicatorState(2, Color.Firebrick, showPurple);
         }
 
         var (activeLights, color) = fiveHourRemaining switch
@@ -317,7 +318,6 @@ internal sealed class QuotaTrayContext : ApplicationContext
             >= 10 => (1, Color.DarkOrange),
             _ => (1, Color.Firebrick)
         };
-        var showPurple = fiveHourRemaining > 25 && resetAfterSeconds is <= 1200;
         return new IndicatorState(activeLights, color, showPurple);
     }
 
