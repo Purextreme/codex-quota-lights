@@ -10,10 +10,23 @@ using System.Runtime.InteropServices;
 public static class TrayNativeMethods {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool DestroyIcon(IntPtr hIcon);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 }
 '@
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
+
+if (-not $RunOnce) {
+    [bool]$createdNew = $false
+    $script:singleInstanceMutex = New-Object System.Threading.Mutex($true, 'Local\CodexQuotaIndicator', [ref]$createdNew)
+    if (-not $createdNew) {
+        $script:singleInstanceMutex.Dispose()
+        exit 0
+    }
+}
 
 $usageUrl = 'https://chatgpt.com/backend-api/wham/usage'
 $fiveHourItem = New-Object System.Windows.Forms.ToolStripMenuItem('5 小时：读取中…')
@@ -34,6 +47,9 @@ $notify.Icon = [System.Drawing.SystemIcons]::Information
 $notify.Text = 'Codex 额度：读取中…'
 $notify.Visible = $true
 $script:generatedIcon = $null
+$script:lastQuotaAttempt = $null
+$script:lastDesktopState = 'Unknown'
+$script:hasQuotaSnapshot = $false
 
 function Format-Duration([double]$Seconds) {
     $duration = [TimeSpan]::FromSeconds([Math]::Max(0, $Seconds))
@@ -54,22 +70,26 @@ function Get-WindowDisplay($Window, [string]$Label) {
 }
 
 function Get-IndicatorState($FiveHourRemaining, $WeeklyRemaining, $ResetAfterSeconds) {
+    $showPurple = $null -ne $ResetAfterSeconds -and [double]$ResetAfterSeconds -ge 0 -and [double]$ResetAfterSeconds -lt 1200
     if ($null -eq $FiveHourRemaining) {
-        return [pscustomobject]@{ ActiveLights = 0; Color = [System.Drawing.Color]::DimGray; ShowPurple = $false }
+        return [pscustomobject]@{ ActiveLights = 0; Color = [System.Drawing.Color]::DimGray; ShowPurple = $showPurple }
     }
 
     if ($null -ne $WeeklyRemaining -and $WeeklyRemaining -le 10 -and $FiveHourRemaining -le 25) {
-        return [pscustomobject]@{ ActiveLights = 2; Color = [System.Drawing.Color]::Firebrick; ShowPurple = $false }
+        return [pscustomobject]@{ ActiveLights = 2; Color = [System.Drawing.Color]::Firebrick; ShowPurple = $showPurple }
     }
 
-    if ($FiveHourRemaining -ge 75) {
-        $activeLights = 4; $color = [System.Drawing.Color]::FromArgb(34, 139, 34)
+    if ($FiveHourRemaining -ge 100) {
+        $activeLights = 4; $color = [System.Drawing.Color]::FromArgb(44, 154, 63)
+    }
+    elseif ($FiveHourRemaining -ge 75) {
+        $activeLights = 3; $color = [System.Drawing.Color]::FromArgb(44, 154, 63)
     }
     elseif ($FiveHourRemaining -ge 50) {
-        $activeLights = 3; $color = [System.Drawing.Color]::FromArgb(34, 139, 34)
+        $activeLights = 2; $color = [System.Drawing.Color]::FromArgb(44, 154, 63)
     }
     elseif ($FiveHourRemaining -ge 25) {
-        $activeLights = 2; $color = [System.Drawing.Color]::FromArgb(34, 139, 34)
+        $activeLights = 1; $color = [System.Drawing.Color]::FromArgb(44, 154, 63)
     }
     elseif ($FiveHourRemaining -ge 10) {
         $activeLights = 1; $color = [System.Drawing.Color]::DarkOrange
@@ -78,7 +98,6 @@ function Get-IndicatorState($FiveHourRemaining, $WeeklyRemaining, $ResetAfterSec
         $activeLights = 1; $color = [System.Drawing.Color]::Firebrick
     }
 
-    $showPurple = $FiveHourRemaining -gt 25 -and $null -ne $ResetAfterSeconds -and [double]$ResetAfterSeconds -le 1200
     return [pscustomobject]@{ ActiveLights = $activeLights; Color = $color; ShowPurple = $showPurple }
 }
 
@@ -114,6 +133,42 @@ function Set-IndicatorIcon($State) {
     }
 }
 
+function Get-CodexDesktopState {
+    $processIds = @(Get-CimInstance Win32_Process -Filter "Name = 'ChatGPT.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -like '*\OpenAI.Codex_*\app\ChatGPT.exe' } |
+        Select-Object -ExpandProperty ProcessId)
+    if ($processIds.Count -eq 0) { return 'Stopped' }
+
+    $foregroundWindow = [TrayNativeMethods]::GetForegroundWindow()
+    if ($foregroundWindow -ne [IntPtr]::Zero) {
+        [uint32]$foregroundProcessId = 0
+        [void][TrayNativeMethods]::GetWindowThreadProcessId($foregroundWindow, [ref]$foregroundProcessId)
+        if ($processIds -contains [int]$foregroundProcessId) { return 'Foreground' }
+    }
+    return 'Background'
+}
+
+function Get-RefreshDecision([string]$DesktopState, [string]$PreviousDesktopState, $LastQuotaAttempt, [datetime]$Now) {
+    if ($DesktopState -eq 'Stopped') { return 'Pause' }
+    if ($null -ne $LastQuotaAttempt -and ($Now - $LastQuotaAttempt).TotalMinutes -lt 5) { return 'Wait' }
+    if ($PreviousDesktopState -eq 'Unknown' -or $PreviousDesktopState -eq 'Stopped') { return 'Refresh' }
+    if ($DesktopState -eq 'Foreground' -and $PreviousDesktopState -ne 'Foreground') { return 'Refresh' }
+
+    $intervalMinutes = if ($DesktopState -eq 'Foreground') { 5 } else { 15 }
+    if ($null -eq $LastQuotaAttempt -or ($Now - $LastQuotaAttempt).TotalMinutes -ge $intervalMinutes) { return 'Refresh' }
+    return 'Wait'
+}
+
+function Set-QuotaPausedDisplay {
+    if (-not $script:hasQuotaSnapshot) {
+        $fiveHourItem.Text = '5 小时：尚未读取'
+        $weeklyItem.Text = '周额度：尚未读取'
+        Set-IndicatorIcon (Get-IndicatorState $null $null $null)
+    }
+    $updatedItem.Text = 'Codex 未运行：已暂停刷新（保留上次额度）'
+    $notify.Text = 'Codex 未运行：已暂停刷新'
+}
+
 function Update-Quota {
     try {
         $authPath = Join-Path $HOME '.codex\auth.json'
@@ -131,11 +186,12 @@ function Update-Quota {
         $weekly = Get-WindowDisplay $usage.rate_limit.secondary_window '周额度'
         $fiveHourItem.Text = $fiveHour.Text
         $weeklyItem.Text = $weekly.Text
-        $updatedItem.Text = "上次更新：$(Get-Date -Format 'HH:mm:ss')（每 10 分钟自动刷新）"
+        $updatedItem.Text = "上次更新：$(Get-Date -Format 'HH:mm:ss')（前台 5 分钟 / 后台 15 分钟）"
         $shortFive = if ($null -eq $fiveHour.Remaining) { '—' } else { "剩 $([Math]::Round($fiveHour.Remaining))%" }
         $shortWeek = if ($null -eq $weekly.Remaining) { '—' } else { "剩 $([Math]::Round($weekly.Remaining))%" }
         $notify.Text = "Codex：5h $shortFive | 周 $shortWeek"
         Set-IndicatorIcon (Get-IndicatorState $fiveHour.Remaining $weekly.Remaining $fiveHour.ResetAfterSeconds)
+        $script:hasQuotaSnapshot = $true
         if ($RunOnce) { Write-Output "$($fiveHour.Text)`n$($weekly.Text)" }
     }
     catch {
@@ -148,8 +204,33 @@ function Update-Quota {
     }
 }
 
+function Invoke-QuotaRefresh([string]$DesktopState) {
+    if ($DesktopState -eq 'Stopped') {
+        Set-QuotaPausedDisplay
+        return
+    }
+    $script:lastQuotaAttempt = Get-Date
+    Update-Quota
+}
+
+function Update-RefreshSchedule {
+    $desktopState = Get-CodexDesktopState
+    $decision = Get-RefreshDecision $desktopState $script:lastDesktopState $script:lastQuotaAttempt (Get-Date)
+    if ($decision -eq 'Pause') {
+        Set-QuotaPausedDisplay
+    }
+    elseif ($decision -eq 'Refresh') {
+        Invoke-QuotaRefresh $desktopState
+    }
+    $script:lastDesktopState = $desktopState
+}
+
 $refreshItem = New-Object System.Windows.Forms.ToolStripMenuItem('立即刷新')
-$refreshItem.Add_Click({ Update-Quota })
+$refreshItem.Add_Click({
+    $desktopState = Get-CodexDesktopState
+    $script:lastDesktopState = $desktopState
+    Invoke-QuotaRefresh $desktopState
+})
 $openItem = New-Object System.Windows.Forms.ToolStripMenuItem('打开 Codex 用量页面')
 $openItem.Add_Click({ Start-Process 'https://chatgpt.com/codex/settings/usage' })
 $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem('退出')
@@ -158,6 +239,7 @@ $exitItem.Add_Click({
     $notify.Visible = $false
     $notify.Dispose()
     if ($null -ne $script:generatedIcon) { $script:generatedIcon.Dispose() }
+    if ($null -ne $script:singleInstanceMutex) { $script:singleInstanceMutex.Dispose() }
     [System.Windows.Forms.Application]::Exit()
 })
 [void]$menu.Items.Add($refreshItem)
@@ -171,9 +253,9 @@ $notify.Add_MouseUp({
 })
 
 $timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 600000
-$timer.Add_Tick({ Update-Quota })
-Update-Quota
+$timer.Interval = 60000
+$timer.Add_Tick({ Update-RefreshSchedule })
+Update-RefreshSchedule
 
 if ($RunOnce) {
     $notify.Visible = $false
