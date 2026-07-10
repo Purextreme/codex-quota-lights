@@ -1,0 +1,33 @@
+# Codex Quota Indicator
+
+Windows 托盘小工具：用 2×2 电量灯概览 Codex 5 小时额度；点击图标后可查看 5 小时与周额度的剩余百分比、重置倒计时。每 10 分钟自动刷新。
+
+## 使用
+
+1. 先在 Codex Desktop 或 Codex CLI 登录同一个 ChatGPT 账号。
+2. 双击 `启动额度指示器.vbs`，它会在后台运行 `CodexQuotaIndicator.ps1`，不会显示终端窗口。
+3. 在系统托盘中查看电量灯；左键点击图标可查看两个额度窗口。
+
+## 图标规则
+
+- 5 小时额度 ≥ 75%：4 个绿灯；≥ 50%：3 个绿灯；≥ 25%：2 个绿灯。
+- 5 小时额度 ≥ 10%：1 个黄灯；< 10%：1 个红灯。
+- 周额度 ≤ 10% 且 5 小时额度 ≤ 25%：显示 2 个红灯，且不显示其他提示。
+- 当 5 小时额度 > 25%、距 5 小时窗口重置 ≤ 20 分钟时，四灯正中央会显示一个紫点。
+- 未亮的灯均为深灰色。
+
+## 构建
+
+本目录保留了一个等价的 C# WinForms 源码（`Program.cs`），便于后续以 .NET SDK 生成独立 exe。在安装 .NET 8 SDK 后，可运行：
+
+```powershell
+dotnet publish -c Release -r win-x64 --self-contained false -o publish
+```
+
+当前可直接运行的 PowerShell 版本不需要 .NET SDK；Windows 自带的 Windows PowerShell 即可。
+
+## 数据与隐私
+
+程序只在本机读取 `%USERPROFILE%\.codex\auth.json` 中现有的 Codex 登录态，并向 `chatgpt.com` 的 Codex 用量服务查询当前额度。token 不会写入日志、界面或网络中的任何第三方服务。
+
+该用量接口不是面向第三方长期保证的公开 API；若 OpenAI 改动它，程序会提示读取失败。可通过菜单打开官方 Usage 页面核对数值或重新登录。
