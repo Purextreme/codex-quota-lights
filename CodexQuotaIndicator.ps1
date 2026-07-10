@@ -69,6 +69,14 @@ function Get-WindowDisplay($Window, [string]$Label) {
     return [pscustomobject]@{ Text = "$Label：剩余 $([Math]::Round($remaining))% · $resetText"; Remaining = $remaining; ResetAfterSeconds = $Window.reset_after_seconds }
 }
 
+function Get-TooltipText($FiveHour, $Weekly) {
+    $shortFive = if ($null -eq $FiveHour.Remaining) { '—' } else { "剩 $([Math]::Round($FiveHour.Remaining))%" }
+    $shortWeek = if ($null -eq $Weekly.Remaining) { '—' } else { "剩 $([Math]::Round($Weekly.Remaining))%" }
+    $fiveReset = if ($null -eq $FiveHour.ResetAfterSeconds) { '重置未知' } else { "$(Format-Duration ([double]$FiveHour.ResetAfterSeconds))后重置" }
+    $weekReset = if ($null -eq $Weekly.ResetAfterSeconds) { '重置未知' } else { "$(Format-Duration ([double]$Weekly.ResetAfterSeconds))后重置" }
+    return "Codex：5h $shortFive · $fiveReset | 周 $shortWeek · $weekReset"
+}
+
 function Get-IndicatorState($FiveHourRemaining, $WeeklyRemaining, $ResetAfterSeconds) {
     $showPurple = $null -ne $ResetAfterSeconds -and [double]$ResetAfterSeconds -ge 0 -and [double]$ResetAfterSeconds -lt 1200
     if ($null -eq $FiveHourRemaining) {
@@ -187,9 +195,7 @@ function Update-Quota {
         $fiveHourItem.Text = $fiveHour.Text
         $weeklyItem.Text = $weekly.Text
         $updatedItem.Text = "上次更新：$(Get-Date -Format 'HH:mm:ss')（前台 5 分钟 / 后台 15 分钟）"
-        $shortFive = if ($null -eq $fiveHour.Remaining) { '—' } else { "剩 $([Math]::Round($fiveHour.Remaining))%" }
-        $shortWeek = if ($null -eq $weekly.Remaining) { '—' } else { "剩 $([Math]::Round($weekly.Remaining))%" }
-        $notify.Text = "Codex：5h $shortFive | 周 $shortWeek"
+        $notify.Text = Get-TooltipText $fiveHour $weekly
         Set-IndicatorIcon (Get-IndicatorState $fiveHour.Remaining $weekly.Remaining $fiveHour.ResetAfterSeconds)
         $script:hasQuotaSnapshot = $true
         if ($RunOnce) { Write-Output "$($fiveHour.Text)`n$($weekly.Text)" }

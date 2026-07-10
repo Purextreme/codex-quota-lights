@@ -230,9 +230,16 @@ internal sealed class QuotaTrayContext : ApplicationContext
 
         var fiveHourLeft = quota.FiveHour.RemainingPercent;
         var weeklyLeft = quota.Weekly.RemainingPercent;
-        _notifyIcon.Text = $"Codex：5h {FormatShortPercent(fiveHourLeft)} | 周 {FormatShortPercent(weeklyLeft)}";
+        _notifyIcon.Text = GetTooltipText(quota.FiveHour, quota.Weekly);
         SetIndicatorIcon(GetIndicatorState(fiveHourLeft, weeklyLeft, quota.FiveHour.ResetAfterSeconds));
         _hasQuotaSnapshot = true;
+    }
+
+    private static string GetTooltipText(QuotaWindow fiveHour, QuotaWindow weekly)
+    {
+        var fiveReset = fiveHour.ResetAfterSeconds is null ? "重置未知" : $"{FormatDuration(fiveHour.ResetAfterSeconds.Value)}后重置";
+        var weeklyReset = weekly.ResetAfterSeconds is null ? "重置未知" : $"{FormatDuration(weekly.ResetAfterSeconds.Value)}后重置";
+        return $"Codex：5h {FormatShortPercent(fiveHour.RemainingPercent)} · {fiveReset} | 周 {FormatShortPercent(weekly.RemainingPercent)} · {weeklyReset}";
     }
 
     private static DesktopState GetCodexDesktopState()
