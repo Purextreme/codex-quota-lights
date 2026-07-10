@@ -247,11 +247,6 @@ $exitItem.Add_Click({
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$menu.Items.Add($exitItem)
 
-$notify.Add_MouseUp({
-    param($sender, $eventArgs)
-    if ($eventArgs.Button -eq [System.Windows.Forms.MouseButtons]::Left) { $menu.Show([System.Windows.Forms.Cursor]::Position) }
-})
-
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 60000
 $timer.Add_Tick({ Update-RefreshSchedule })

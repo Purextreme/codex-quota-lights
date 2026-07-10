@@ -61,19 +61,9 @@ internal sealed class QuotaTrayContext : ApplicationContext
             Text = "Codex 额度：读取中…",
             Visible = true
         };
-        _notifyIcon.MouseUp += OnNotifyIconMouseUp;
-
         _stateTimer.Tick += async (_, _) => await UpdateRefreshScheduleAsync();
         _stateTimer.Start();
         _ = UpdateRefreshScheduleAsync();
-    }
-
-    private void OnNotifyIconMouseUp(object? sender, MouseEventArgs e)
-    {
-        if (e.Button == MouseButtons.Left)
-        {
-            _notifyIcon.ContextMenuStrip?.Show(Cursor.Position);
-        }
     }
 
     private async Task RefreshNowAsync()
