@@ -270,7 +270,7 @@ internal sealed class QuotaTrayContext : ApplicationContext
     {
         var fiveReset = fiveHour.ResetElapsed ? "等待刷新" : fiveHour.ResetAfterSeconds is null ? "重置未知" : $"{FormatDuration(fiveHour.ResetAfterSeconds.Value)}后重置";
         var weeklyReset = weekly.ResetElapsed ? "等待刷新" : weekly.ResetAfterSeconds is null ? "重置未知" : $"{FormatDuration(weekly.ResetAfterSeconds.Value)}后重置";
-        return $"Codex：5h {FormatShortPercent(fiveHour.RemainingPercent)} · {fiveReset} | 周 {FormatShortPercent(weekly.RemainingPercent)} · {weeklyReset}";
+        return $"Codex 额度\n5h：{FormatShortPercent(fiveHour.RemainingPercent)} · {fiveReset}\nweek：{FormatShortPercent(weekly.RemainingPercent)} · {weeklyReset}";
     }
 
     private static DesktopState GetCodexDesktopState()

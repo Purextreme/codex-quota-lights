@@ -86,7 +86,7 @@ function Get-TooltipText($FiveHour, $Weekly) {
     $shortWeek = if ($null -eq $Weekly.Remaining) { '—' } else { "剩 $([Math]::Round($Weekly.Remaining))%" }
     $fiveReset = if ($FiveHour.ResetElapsed) { '等待刷新' } elseif ($null -eq $FiveHour.ResetAfterSeconds) { '重置未知' } else { "$(Format-Duration ([double]$FiveHour.ResetAfterSeconds))后重置" }
     $weekReset = if ($Weekly.ResetElapsed) { '等待刷新' } elseif ($null -eq $Weekly.ResetAfterSeconds) { '重置未知' } else { "$(Format-Duration ([double]$Weekly.ResetAfterSeconds))后重置" }
-    return "Codex：5h $shortFive · $fiveReset | 周 $shortWeek · $weekReset"
+    return "Codex 额度`n5h：$shortFive · $fiveReset`nweek：$shortWeek · $weekReset"
 }
 
 function Set-ResetDeadline($Window) {
