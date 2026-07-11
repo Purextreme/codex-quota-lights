@@ -4,6 +4,7 @@
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Net.Http
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -50,6 +51,13 @@ $script:generatedIcon = $null
 $script:lastQuotaAttempt = $null
 $script:lastDesktopState = 'Unknown'
 $script:hasQuotaSnapshot = $false
+$script:fiveHourSnapshot = $null
+$script:weeklySnapshot = $null
+$script:quotaRequestTask = $null
+$script:quotaRequestMessage = $null
+$script:runOnceError = $null
+$script:httpClient = New-Object System.Net.Http.HttpClient
+$script:httpClient.Timeout = [TimeSpan]::FromSeconds(20)
 
 function Format-Duration([double]$Seconds) {
     $duration = [TimeSpan]::FromSeconds([Math]::Max(0, $Seconds))
@@ -60,21 +68,66 @@ function Format-Duration([double]$Seconds) {
 
 function Get-WindowDisplay($Window, [string]$Label) {
     if ($null -eq $Window) {
-        return [pscustomobject]@{ Text = "$Label：当前套餐未提供此窗口"; Remaining = $null; ResetAfterSeconds = $null }
+        return [pscustomobject]@{ Label = $Label; Text = "$Label：当前套餐未提供此窗口"; Remaining = $null; ResetAfterSeconds = $null }
     }
 
-    $used = [Math]::Min(100, [Math]::Max(0, [double]$Window.used_percent))
+    [double]$used = 0
+    if ($null -eq $Window.used_percent -or -not [double]::TryParse([string]$Window.used_percent, [ref]$used)) {
+        return [pscustomobject]@{ Label = $Label; Text = "$Label：额度数据不完整"; Remaining = $null; ResetAfterSeconds = $Window.reset_after_seconds }
+    }
+    $used = [Math]::Min(100, [Math]::Max(0, $used))
     $remaining = 100 - $used
     $resetText = if ($null -eq $Window.reset_after_seconds) { '重置时间未知' } else { "$(Format-Duration ([double]$Window.reset_after_seconds)) 后重置" }
-    return [pscustomobject]@{ Text = "$Label：剩余 $([Math]::Round($remaining))% · $resetText"; Remaining = $remaining; ResetAfterSeconds = $Window.reset_after_seconds }
+    return [pscustomobject]@{ Label = $Label; Text = "$Label：剩余 $([Math]::Round($remaining))% · $resetText"; Remaining = $remaining; ResetAfterSeconds = $Window.reset_after_seconds }
 }
 
 function Get-TooltipText($FiveHour, $Weekly) {
     $shortFive = if ($null -eq $FiveHour.Remaining) { '—' } else { "剩 $([Math]::Round($FiveHour.Remaining))%" }
     $shortWeek = if ($null -eq $Weekly.Remaining) { '—' } else { "剩 $([Math]::Round($Weekly.Remaining))%" }
-    $fiveReset = if ($null -eq $FiveHour.ResetAfterSeconds) { '重置未知' } else { "$(Format-Duration ([double]$FiveHour.ResetAfterSeconds))后重置" }
-    $weekReset = if ($null -eq $Weekly.ResetAfterSeconds) { '重置未知' } else { "$(Format-Duration ([double]$Weekly.ResetAfterSeconds))后重置" }
+    $fiveReset = if ($FiveHour.ResetElapsed) { '等待刷新' } elseif ($null -eq $FiveHour.ResetAfterSeconds) { '重置未知' } else { "$(Format-Duration ([double]$FiveHour.ResetAfterSeconds))后重置" }
+    $weekReset = if ($Weekly.ResetElapsed) { '等待刷新' } elseif ($null -eq $Weekly.ResetAfterSeconds) { '重置未知' } else { "$(Format-Duration ([double]$Weekly.ResetAfterSeconds))后重置" }
     return "Codex：5h $shortFive · $fiveReset | 周 $shortWeek · $weekReset"
+}
+
+function Set-ResetDeadline($Window) {
+    $resetAtUtc = $null
+    [double]$resetSeconds = 0
+    if ($null -ne $Window.ResetAfterSeconds -and [double]::TryParse([string]$Window.ResetAfterSeconds, [ref]$resetSeconds) -and $resetSeconds -ge 0) {
+        $resetAtUtc = [DateTime]::UtcNow.AddSeconds($resetSeconds)
+    }
+    $Window | Add-Member -NotePropertyName ResetAtUtc -NotePropertyValue $resetAtUtc -Force
+    return $Window
+}
+
+function Get-LiveWindowDisplay($Snapshot) {
+    $resetAfterSeconds = $null
+    $resetElapsed = $false
+    if ($null -ne $Snapshot.ResetAtUtc) {
+        $resetAfterSeconds = ([datetime]$Snapshot.ResetAtUtc - [DateTime]::UtcNow).TotalSeconds
+        if ($resetAfterSeconds -le 0) {
+            $resetAfterSeconds = $null
+            $resetElapsed = $true
+        }
+    }
+
+    if ($null -eq $Snapshot.Remaining) {
+        $text = $Snapshot.Text
+    }
+    else {
+        $resetText = if ($resetElapsed) { '已到重置时间，等待刷新' } elseif ($null -eq $resetAfterSeconds) { '重置时间未知' } else { "$(Format-Duration $resetAfterSeconds) 后重置" }
+        $text = "$($Snapshot.Label)：剩余 $([Math]::Round($Snapshot.Remaining))% · $resetText"
+    }
+    return [pscustomobject]@{ Text = $text; Remaining = $Snapshot.Remaining; ResetAfterSeconds = $resetAfterSeconds; ResetElapsed = $resetElapsed }
+}
+
+function Update-LocalQuotaDisplay {
+    if (-not $script:hasQuotaSnapshot -or $null -eq $script:fiveHourSnapshot -or $null -eq $script:weeklySnapshot) { return }
+    $fiveHour = Get-LiveWindowDisplay $script:fiveHourSnapshot
+    $weekly = Get-LiveWindowDisplay $script:weeklySnapshot
+    $fiveHourItem.Text = $fiveHour.Text
+    $weeklyItem.Text = $weekly.Text
+    $notify.Text = Get-TooltipText $fiveHour $weekly
+    Set-IndicatorIcon (Get-IndicatorState $fiveHour.Remaining $weekly.Remaining $fiveHour.ResetAfterSeconds)
 }
 
 function Get-IndicatorState($FiveHourRemaining, $WeeklyRemaining, $ResetAfterSeconds) {
@@ -177,7 +230,51 @@ function Set-QuotaPausedDisplay {
     $notify.Text = 'Codex 未运行：已暂停刷新'
 }
 
+function Set-QuotaFailureDisplay {
+    $fiveHourItem.Text = '5 小时：无法读取'
+    $weeklyItem.Text = '周额度：无法读取'
+    $updatedItem.Text = '请确认 Codex 已登录，然后点击立即刷新'
+    $notify.Text = 'Codex 额度：读取失败'
+    Set-IndicatorIcon (Get-IndicatorState $null $null $null)
+}
+
+function Complete-QuotaRefresh {
+    if ($null -eq $script:quotaRequestTask -or -not $script:quotaRequestTask.IsCompleted) { return }
+
+    $response = $null
+    try {
+        $response = $script:quotaRequestTask.GetAwaiter().GetResult()
+        if (-not $response.IsSuccessStatusCode) {
+            throw "用量服务返回 HTTP $([int]$response.StatusCode)；请重新登录 Codex 后重试。"
+        }
+        $json = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        $usage = $json | ConvertFrom-Json
+        if ($null -eq $usage.rate_limit) { throw '用量服务未返回额度窗口。' }
+
+        $fiveHour = Set-ResetDeadline (Get-WindowDisplay $usage.rate_limit.primary_window '5 小时')
+        $weekly = Set-ResetDeadline (Get-WindowDisplay $usage.rate_limit.secondary_window '周额度')
+        $script:fiveHourSnapshot = $fiveHour
+        $script:weeklySnapshot = $weekly
+        $script:hasQuotaSnapshot = $true
+        $updatedItem.Text = "上次更新：$(Get-Date -Format 'HH:mm:ss')（前台 5 分钟 / 后台 15 分钟）"
+        Update-LocalQuotaDisplay
+        if ($RunOnce) { Write-Output "$($fiveHour.Text)`n$($weekly.Text)" }
+    }
+    catch {
+        Set-QuotaFailureDisplay
+        if ($RunOnce) { $script:runOnceError = $_ }
+    }
+    finally {
+        if ($null -ne $response) { $response.Dispose() }
+        if ($null -ne $script:quotaRequestMessage) { $script:quotaRequestMessage.Dispose() }
+        $script:quotaRequestTask = $null
+        $script:quotaRequestMessage = $null
+        if ($null -ne $completionTimer) { $completionTimer.Stop() }
+    }
+}
+
 function Update-Quota {
+    if ($null -ne $script:quotaRequestTask) { return }
     try {
         $authPath = Join-Path $HOME '.codex\auth.json'
         if (-not (Test-Path -LiteralPath $authPath)) { throw '未找到 .codex\auth.json；请先在 Codex 登录。' }
@@ -185,28 +282,23 @@ function Update-Quota {
         $token = $auth.tokens.access_token
         if ([string]::IsNullOrWhiteSpace($token)) { throw 'Codex 登录信息不完整；请重新登录。' }
 
-        $headers = @{ Authorization = "Bearer $token"; 'OpenAI-Beta' = 'codex-1'; originator = 'Codex Desktop' }
-        if (-not [string]::IsNullOrWhiteSpace($auth.tokens.account_id)) { $headers['ChatGPT-Account-ID'] = $auth.tokens.account_id }
-        $usage = Invoke-RestMethod -Uri $usageUrl -Headers $headers -TimeoutSec 20
-        if ($null -eq $usage.rate_limit) { throw '用量服务未返回额度窗口。' }
-
-        $fiveHour = Get-WindowDisplay $usage.rate_limit.primary_window '5 小时'
-        $weekly = Get-WindowDisplay $usage.rate_limit.secondary_window '周额度'
-        $fiveHourItem.Text = $fiveHour.Text
-        $weeklyItem.Text = $weekly.Text
-        $updatedItem.Text = "上次更新：$(Get-Date -Format 'HH:mm:ss')（前台 5 分钟 / 后台 15 分钟）"
-        $notify.Text = Get-TooltipText $fiveHour $weekly
-        Set-IndicatorIcon (Get-IndicatorState $fiveHour.Remaining $weekly.Remaining $fiveHour.ResetAfterSeconds)
-        $script:hasQuotaSnapshot = $true
-        if ($RunOnce) { Write-Output "$($fiveHour.Text)`n$($weekly.Text)" }
+        $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $usageUrl)
+        $request.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $token)
+        [void]$request.Headers.TryAddWithoutValidation('OpenAI-Beta', 'codex-1')
+        [void]$request.Headers.TryAddWithoutValidation('originator', 'Codex Desktop')
+        if (-not [string]::IsNullOrWhiteSpace($auth.tokens.account_id)) {
+            [void]$request.Headers.TryAddWithoutValidation('ChatGPT-Account-ID', [string]$auth.tokens.account_id)
+        }
+        $script:quotaRequestMessage = $request
+        $script:quotaRequestTask = $script:httpClient.SendAsync($request)
+        $completionTimer.Start()
     }
     catch {
-        $fiveHourItem.Text = '5 小时：无法读取'
-        $weeklyItem.Text = '周额度：无法读取'
-        $updatedItem.Text = '请确认 Codex 已登录，然后点击立即刷新'
-        $notify.Text = 'Codex 额度：读取失败'
-        Set-IndicatorIcon (Get-IndicatorState $null $null $null)
-        if ($RunOnce) { throw }
+        if ($null -ne $script:quotaRequestMessage) { $script:quotaRequestMessage.Dispose() }
+        $script:quotaRequestMessage = $null
+        $script:quotaRequestTask = $null
+        Set-QuotaFailureDisplay
+        if ($RunOnce) { $script:runOnceError = $_ }
     }
 }
 
@@ -215,11 +307,13 @@ function Invoke-QuotaRefresh([string]$DesktopState) {
         Set-QuotaPausedDisplay
         return
     }
+    if ($null -ne $script:quotaRequestTask) { return }
     $script:lastQuotaAttempt = Get-Date
     Update-Quota
 }
 
 function Update-RefreshSchedule {
+    Update-LocalQuotaDisplay
     $desktopState = Get-CodexDesktopState
     $decision = Get-RefreshDecision $desktopState $script:lastDesktopState $script:lastQuotaAttempt (Get-Date)
     if ($decision -eq 'Pause') {
@@ -242,9 +336,12 @@ $openItem.Add_Click({ Start-Process 'https://chatgpt.com/codex/settings/usage' }
 $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem('退出')
 $exitItem.Add_Click({
     $timer.Stop()
+    $completionTimer.Stop()
     $notify.Visible = $false
     $notify.Dispose()
     if ($null -ne $script:generatedIcon) { $script:generatedIcon.Dispose() }
+    if ($null -ne $script:quotaRequestMessage) { $script:quotaRequestMessage.Dispose() }
+    $script:httpClient.Dispose()
     if ($null -ne $script:singleInstanceMutex) { $script:singleInstanceMutex.Dispose() }
     [System.Windows.Forms.Application]::Exit()
 })
@@ -256,12 +353,23 @@ $exitItem.Add_Click({
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 60000
 $timer.Add_Tick({ Update-RefreshSchedule })
+$completionTimer = New-Object System.Windows.Forms.Timer
+$completionTimer.Interval = 200
+$completionTimer.Add_Tick({ Complete-QuotaRefresh })
 Update-RefreshSchedule
 
 if ($RunOnce) {
+    while ($null -ne $script:quotaRequestTask) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Complete-QuotaRefresh
+        Start-Sleep -Milliseconds 20
+    }
     $notify.Visible = $false
     $notify.Dispose()
     if ($null -ne $script:generatedIcon) { $script:generatedIcon.Dispose() }
+    $completionTimer.Dispose()
+    $script:httpClient.Dispose()
+    if ($null -ne $script:runOnceError) { throw $script:runOnceError }
     exit 0
 }
 

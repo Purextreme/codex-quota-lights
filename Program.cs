@@ -39,6 +39,8 @@ internal sealed class QuotaTrayContext : ApplicationContext
     private bool _hasQuotaSnapshot;
     private DateTime? _lastQuotaAttempt;
     private DesktopState _lastDesktopState = DesktopState.Unknown;
+    private QuotaSnapshot? _quotaSnapshot;
+    private DateTime? _snapshotReceivedAtUtc;
 
     public QuotaTrayContext()
     {
@@ -81,6 +83,7 @@ internal sealed class QuotaTrayContext : ApplicationContext
 
     private async Task UpdateRefreshScheduleAsync()
     {
+        UpdateLocalQuotaDisplay();
         var desktopState = GetCodexDesktopState();
         if (ShouldRefresh(desktopState, _lastDesktopState, _lastQuotaAttempt))
         {
@@ -110,7 +113,10 @@ internal sealed class QuotaTrayContext : ApplicationContext
         }
         catch (Exception exception)
         {
-            var message = exception.Message.Length > 60 ? exception.Message[..60] + "…" : exception.Message;
+            const int maximumMessageLength = 50;
+            var message = exception.Message.Length > maximumMessageLength
+                ? exception.Message[..maximumMessageLength] + "…"
+                : exception.Message;
             _fiveHourItem.Text = "5 小时：无法读取";
             _weeklyItem.Text = "周额度：无法读取";
             _updatedItem.Text = "请确认 Codex 已登录，然后点击立即刷新";
@@ -224,30 +230,67 @@ internal sealed class QuotaTrayContext : ApplicationContext
 
     private void UpdateQuotaDisplay(QuotaSnapshot quota)
     {
-        _fiveHourItem.Text = FormatWindow(quota.FiveHour);
-        _weeklyItem.Text = FormatWindow(quota.Weekly);
+        _quotaSnapshot = quota;
+        _snapshotReceivedAtUtc = DateTime.UtcNow;
         _updatedItem.Text = $"上次更新：{DateTime.Now:HH:mm:ss}（前台 5 分钟 / 后台 15 分钟）";
-
-        var fiveHourLeft = quota.FiveHour.RemainingPercent;
-        var weeklyLeft = quota.Weekly.RemainingPercent;
-        _notifyIcon.Text = GetTooltipText(quota.FiveHour, quota.Weekly);
-        SetIndicatorIcon(GetIndicatorState(fiveHourLeft, weeklyLeft, quota.FiveHour.ResetAfterSeconds));
         _hasQuotaSnapshot = true;
+        UpdateLocalQuotaDisplay();
+    }
+
+    private void UpdateLocalQuotaDisplay()
+    {
+        if (_quotaSnapshot is null || _snapshotReceivedAtUtc is null)
+        {
+            return;
+        }
+
+        var elapsedSeconds = Math.Max(0, (DateTime.UtcNow - _snapshotReceivedAtUtc.Value).TotalSeconds);
+        var fiveHour = GetLiveWindow(_quotaSnapshot.FiveHour, elapsedSeconds);
+        var weekly = GetLiveWindow(_quotaSnapshot.Weekly, elapsedSeconds);
+        _fiveHourItem.Text = FormatWindow(fiveHour);
+        _weeklyItem.Text = FormatWindow(weekly);
+        _notifyIcon.Text = GetTooltipText(fiveHour, weekly);
+        SetIndicatorIcon(GetIndicatorState(fiveHour.RemainingPercent, weekly.RemainingPercent, fiveHour.ResetAfterSeconds));
+    }
+
+    private static QuotaWindow GetLiveWindow(QuotaWindow window, double elapsedSeconds)
+    {
+        if (window.ResetAfterSeconds is null)
+        {
+            return window;
+        }
+
+        var remainingSeconds = window.ResetAfterSeconds.Value - elapsedSeconds;
+        return remainingSeconds <= 0
+            ? window with { ResetAfterSeconds = null, ResetElapsed = true }
+            : window with { ResetAfterSeconds = remainingSeconds, ResetElapsed = false };
     }
 
     private static string GetTooltipText(QuotaWindow fiveHour, QuotaWindow weekly)
     {
-        var fiveReset = fiveHour.ResetAfterSeconds is null ? "重置未知" : $"{FormatDuration(fiveHour.ResetAfterSeconds.Value)}后重置";
-        var weeklyReset = weekly.ResetAfterSeconds is null ? "重置未知" : $"{FormatDuration(weekly.ResetAfterSeconds.Value)}后重置";
+        var fiveReset = fiveHour.ResetElapsed ? "等待刷新" : fiveHour.ResetAfterSeconds is null ? "重置未知" : $"{FormatDuration(fiveHour.ResetAfterSeconds.Value)}后重置";
+        var weeklyReset = weekly.ResetElapsed ? "等待刷新" : weekly.ResetAfterSeconds is null ? "重置未知" : $"{FormatDuration(weekly.ResetAfterSeconds.Value)}后重置";
         return $"Codex：5h {FormatShortPercent(fiveHour.RemainingPercent)} · {fiveReset} | 周 {FormatShortPercent(weekly.RemainingPercent)} · {weeklyReset}";
     }
 
     private static DesktopState GetCodexDesktopState()
     {
-        var processIds = Process.GetProcessesByName("ChatGPT")
-            .Where(IsCodexDesktopProcess)
-            .Select(process => process.Id)
-            .ToHashSet();
+        var processes = Process.GetProcessesByName("ChatGPT");
+        HashSet<int> processIds;
+        try
+        {
+            processIds = processes
+                .Where(IsCodexDesktopProcess)
+                .Select(process => process.Id)
+                .ToHashSet();
+        }
+        finally
+        {
+            foreach (var process in processes)
+            {
+                process.Dispose();
+            }
+        }
         if (processIds.Count == 0)
         {
             return DesktopState.Stopped;
@@ -284,7 +327,7 @@ internal sealed class QuotaTrayContext : ApplicationContext
             return $"{window.Label}：当前套餐未提供此窗口";
         }
 
-        var reset = window.ResetAfterSeconds is null ? "重置时间未知" : $"{FormatDuration(window.ResetAfterSeconds.Value)} 后重置";
+        var reset = window.ResetElapsed ? "已到重置时间，等待刷新" : window.ResetAfterSeconds is null ? "重置时间未知" : $"{FormatDuration(window.ResetAfterSeconds.Value)} 后重置";
         return $"{window.Label}：剩余 {window.RemainingPercent.Value:0}% · {reset}";
     }
 
@@ -398,7 +441,7 @@ internal sealed class QuotaTrayContext : ApplicationContext
 
 internal sealed record QuotaSnapshot(QuotaWindow FiveHour, QuotaWindow Weekly);
 
-internal sealed record QuotaWindow(string Label, double? UsedPercent, double? ResetAfterSeconds)
+internal sealed record QuotaWindow(string Label, double? UsedPercent, double? ResetAfterSeconds, bool ResetElapsed = false)
 {
     public double? RemainingPercent => UsedPercent is null ? null : 100 - UsedPercent.Value;
 }
