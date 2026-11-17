@@ -57,6 +57,16 @@ wscript.exe '.\启动额度指示器.vbs'
 
 也可直接传入 `-PersonalHome 'D:\Profiles\Personal' -CompanyHome 'D:\Profiles\Company'`。工具不会修改登录文件或认证环境，不会把缺失或失效的账户回退到另一个账户。
 
+Codex App 切换空间时可能覆盖个人目录中的登录态。工具会核对令牌及用量响应的空间类型，避免把公司额度显示到个人行。在个人空间点击“立即刷新”一次后，工具会用 Windows DPAPI（当前 Windows 用户）加密缓存个人访问令牌；切到同一用户的公司空间后，仍可单独查询个人额度，重启指示器后也可继续使用。
+
+个人和公司都支持自动续期。在指示器右键菜单分别点击“连接个人自动续期…”和“连接公司自动续期…”，在浏览器为对应空间各完成一次授权。也可运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CodexQuotaIndicator.ps1 -ConnectPersonal` 或 `-ConnectCompany`，每次连接一个空间。已有授权或对应登录目录用于限定空间与用户。完成后，无需再切换 Codex 空间或手动刷新登录态；升级前已连接的个人授权可继续使用。
+
+两行分别绑定授权时选定的个人、公司空间。同一用户切换个人、公司或其他公司空间时，两行仍显示各自绑定空间的额度，不随当前选择串用；重启后也会恢复各自授权。公司行固定显示已授权的公司，并不自动改为其他公司。若需要监控另一家公司，使用独立的 `-CompanyHome` 登录目录并为其连接授权。切换到不同用户时，不使用原用户的独立授权或旧额度；切换回来后可恢复。异步续期过程中切换用户时，已成功轮换的凭据仍会保存，但不会更新新用户的显示。
+
+指示器为两行分别使用独立的 OAuth 授权，刷新令牌由它单独管理，不复制或轮换 Codex 正在使用的刷新令牌，不修改 Codex 登录文件。访问令牌临近到期时，在下一次额度查询前自动续期；收到认证拒绝时续期并重试一次。刷新后的令牌以 Windows DPAPI 加密保存，各自的跨进程锁避免重复消费同一个刷新令牌；一行网络错误不会阻塞另一行。网络错误稍后重试，授权撤销后提示重新连接。
+
+缓存位于 `%LOCALAPPDATA%\CodexQuotaIndicator`。`personal-*.dpapi` 是原有的个人访问令牌缓存，`personal-session-*.dpapi` 和 `company-session-*.dpapi` 分别保存两行独立授权的访问和刷新令牌，均绑定当前 Windows 用户。未连接自动续期时，原有登录态到期后仍需在对应环境重新登录。用户不匹配或授权失效时，不会使用另一空间的额度。`-StateDirectory` 可指定隔离的缓存目录，用于测试。
+
 ## HTTP 代理
 
 两个账户共用代理选择规则：`-Proxy` 参数优先，其次是进程继承的 `HTTPS_PROXY`；均未设置时使用 .NET/Windows 默认代理行为。已配置的代理会显式设置到每个 `HttpClientHandler.Proxy`，禁用本地地址绕过；代理失败会报告失败，不会重试直连。无效或显式为空的 `-Proxy` 会报告配置错误。
@@ -84,7 +94,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CodexQuotaIndicator.ps
 
 每个窗口输出 `remainingPercent`、UTC 重置时间、剩余秒数、是否到期、旧值标记及窗口状态。不可用值为 JSON `null`，不会伪装成 0。账户错误使用固定状态码，例如 `missing-auth`、`unauthorized`、`offline`、`timeout`、`proxy-config`；输出不包含登录标识、文件路径、令牌或原始服务错误响应。
 
-两个账户的四个额度均有效时退出码为 0；任何账户或窗口不可用时为 1，同时仍输出另一个账户的结果。网络等待上限约 30 秒，退出取消收尾最多额外等待 2 秒；本地认证文件读取不属于网络超时范围。
+两个账户的四个额度均有效时退出码为 0；任何账户或窗口不可用时为 1，同时仍输出另一个账户的结果。包含续期时，网络等待上限约 55 秒，退出取消收尾最多额外等待 2 秒；本地认证文件读取不属于网络超时范围。
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\CodexQuotaIndicator.ps1 -RunOnce
@@ -103,6 +113,6 @@ dotnet publish -c Release -r win-x64 --self-contained false -o publish
 
 ## 数据与隐私
 
-工具只读取指定目录内现有的 Codex 登录态，并沿用第一方 `https://chatgpt.com/backend-api/wham/usage` 请求及认证头。不会写回认证文件、记录令牌或显示原始错误响应；配置代理时连接经该代理传输。
+工具读取指定目录内现有的 Codex 登录态，并沿用第一方 `https://chatgpt.com/backend-api/wham/usage` 请求及认证头。连接自动续期时，只向 `https://auth.openai.com` 发起独立的 PKCE 授权与令牌续期。两行访问令牌及独立授权的刷新令牌仅以 Windows DPAPI 加密保存；不复制 Codex 刷新令牌，不写回 Codex 认证文件，不在日志或输出中记录令牌，不显示原始错误响应。配置代理时，额度及续期请求均经该代理传输。
 
 该用量接口可能变化。遇到登录失效或响应格式变化，请通过菜单打开官方 Usage 页面核对，并在对应环境重新登录。
